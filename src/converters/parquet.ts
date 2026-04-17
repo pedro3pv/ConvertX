@@ -116,6 +116,7 @@ export async function convert(
           stringifier.end();
         } catch (err) {
           settleReject(err);
+          writeStream.destroy(err as Error);
           stringifier.destroy(err as Error);
         }
       })();

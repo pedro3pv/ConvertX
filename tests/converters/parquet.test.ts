@@ -4,22 +4,30 @@ import { Writable } from "node:stream";
 // Helper mocks
 const mockParquetMetadataAsync = mock(async () => {
   return {
-    row_groups: [{ num_rows: 1 }]
+    row_groups: [{ num_rows: 1 }],
   };
 });
 
-const mockParquetRead = mock(async (options: any) => {
-  if (options.onComplete) {
-    options.onComplete([{ col1: "value" }]);
-  }
-  return [];
-});
+const mockParquetRead = mock(
+  async (options: {
+    file: unknown;
+    rowStart: number;
+    rowEnd: number;
+    rowFormat: string;
+    onComplete: (rows: { col1: string }[]) => void;
+  }) => {
+    if (options.onComplete) {
+      options.onComplete([{ col1: "value" }]);
+    }
+    return [];
+  },
+);
 
-const mockCreateWriteStream = mock((_path: string) => {
+const mockCreateWriteStream = mock(() => {
   return new Writable({
     write(_chunk, _encoding, callback) {
       callback();
-    }
+    },
   });
 });
 
@@ -29,24 +37,23 @@ const mockFileHandle = {
   read: mock(async (buf: Buffer) => {
     return { bytesRead: buf.length, buffer: buf };
   }),
-  close: mock(async () => {})
+  close: mock(async () => {}),
 };
 
 mock.module("node:fs/promises", () => ({
-  open: mock(async () => mockFileHandle)
+  open: mock(async () => mockFileHandle),
 }));
 
 mock.module("hyparquet", () => {
   return {
     parquetMetadataAsync: mockParquetMetadataAsync,
-    parquetRead: mockParquetRead
+    parquetRead: mockParquetRead,
   };
 });
 
-
 mock.module("node:fs", () => {
   return {
-    createWriteStream: mockCreateWriteStream
+    createWriteStream: mockCreateWriteStream,
   };
 });
 
@@ -59,12 +66,19 @@ describe("parquet converter", () => {
     expect(result).toBe("Done");
   });
 
-  test("convert rejects when metadata fails", async () => {
-    mockParquetMetadataAsync.mockRejectedValueOnce(new Error("Metadata error"));
-    
-    expect(
-      convert("invalid.parquet", "parquet", "csv", "output.csv")
-    ).rejects.toThrow("Metadata error");
+  test("convert rejects when parquetRead fails", async () => {
+    mockParquetRead.mockRejectedValueOnce(new Error("Read error"));
+
+    await expect(convert("invalid.parquet", "parquet", "csv", "output.csv")).rejects.toThrow(
+      "Read error",
+    );
   });
 
+  test("convert rejects when metadata fails", async () => {
+    mockParquetMetadataAsync.mockRejectedValueOnce(new Error("Metadata error"));
+
+    await expect(convert("invalid.parquet", "parquet", "csv", "output.csv")).rejects.toThrow(
+      "Metadata error",
+    );
+  });
 });

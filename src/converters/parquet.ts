@@ -14,13 +14,9 @@ export const properties = {
 
 export async function convert(
   filePath: string,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  fileType: string,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  convertTo: string,
+  _fileType: string,
+  _convertTo: string,
   targetPath: string,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  options?: unknown,
 ): Promise<string> {
   const fileHandle = await fs.open(filePath, "r");
   try {
@@ -36,25 +32,64 @@ export async function convert(
     };
 
     // Use the async version of metadata reader
-    const metadata = await parquetMetadataAsync(file as any);
+    const metadata = await parquetMetadataAsync(file);
     const stringifier = stringify({ header: true });
     const writeStream = createWriteStream(targetPath);
 
     return new Promise((resolve, reject) => {
       stringifier.pipe(writeStream);
 
-      writeStream.on("finish", async () => {
-        await fileHandle.close();
-        resolve("Done");
-      });
-      writeStream.on("error", async (err) => {
-        await fileHandle.close();
-        reject(err);
-      });
-      stringifier.on("error", async (err) => {
-        await fileHandle.close();
-        reject(err);
-      });
+      let settled = false;
+      let closePromise: Promise<void> | undefined;
+
+      const closeFile = (): Promise<void> => {
+        if (!closePromise) {
+          closePromise = fileHandle.close();
+        }
+        return closePromise;
+      };
+
+      const settleResolve = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        closeFile()
+          .catch(() => {
+            // Ignore close failures on resolve path to avoid leaving the promise pending.
+          })
+          .finally(() => {
+            resolve("Done");
+          });
+      };
+
+      const settleReject = (err: unknown) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        closeFile()
+          .catch(() => {
+            // Preserve original error when rejecting.
+          })
+          .finally(() => {
+            reject(err);
+          });
+      };
+
+      writeStream.on("finish", settleResolve);
+      writeStream.on("error", settleReject);
+      stringifier.on("error", settleReject);
+
+      const writeRow = async (row: Record<string, unknown>) => {
+        if (stringifier.write(row)) {
+          return;
+        }
+        await new Promise<void>((drainResolve, drainReject) => {
+          stringifier.once("drain", drainResolve);
+          stringifier.once("error", drainReject);
+        });
+      };
 
       (async () => {
         try {
@@ -62,16 +97,16 @@ export async function convert(
           for (const rowGroup of metadata.row_groups) {
             const numRows = Number(rowGroup.num_rows);
             const rowEnd = rowStart + numRows;
-            
+
             await parquetRead({
-              file: file as any,
+              file: file,
               rowStart,
               rowEnd,
               rowFormat: "object",
-              onComplete: (rows) => {
+              onComplete: async (rows) => {
                 if (Array.isArray(rows)) {
                   for (const row of rows) {
-                    stringifier.write(row);
+                    await writeRow(row);
                   }
                 }
               },
@@ -80,6 +115,7 @@ export async function convert(
           }
           stringifier.end();
         } catch (err) {
+          settleReject(err);
           stringifier.destroy(err as Error);
         }
       })();
@@ -89,5 +125,3 @@ export async function convert(
     throw err;
   }
 }
-
-
